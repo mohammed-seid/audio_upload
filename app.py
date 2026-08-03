@@ -153,6 +153,17 @@ def save_audio_to_github(audio_bytes: bytes, filename: str) -> bool:
         st.error(f"Upload failed: {str(e)}")
         return False
 
+
+def build_audio_filenames(enumerator: str, farmer_id: str, farmer_name: str, file_extensions: list[str]) -> list[str]:
+    """Create unique filenames for one or more audio files belonging to the same farmer."""
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    safe_name = farmer_name.replace(' ', '_').lower()
+    filenames = []
+    for index, extension in enumerate(file_extensions):
+        suffix = f"_{index + 1}" if len(file_extensions) > 1 else ""
+        filenames.append(f"{enumerator}_{farmer_id}_{safe_name}_{timestamp}{suffix}.{extension}")
+    return filenames
+
 # ============================================================================
 # AUTHENTICATION
 # ============================================================================
@@ -244,42 +255,42 @@ def render_upload_interface(df_assignments: pd.DataFrame):
         farmer_name = farmer_row['farmer_name']
         
         st.markdown("---")
-        st.subheader("2️⃣ Upload Audio File")
-        st.info(f"Please select the pre-recorded audio file for **{farmer_name}** from your device.")
+        st.subheader("2️⃣ Upload Audio File(s)")
+        st.info(f"You can upload one or more audio files for **{farmer_name}** from your device.")
         
         # File Uploader tailored for mobile audio files
-        uploaded_audio = st.file_uploader(
-            "Choose an audio file", 
-            type=['wav', 'mp3', 'm4a', 'ogg', 'amr', 'aac', 'flac']
+        uploaded_audios = st.file_uploader(
+            "Choose one or more audio files",
+            type=['wav', 'mp3', 'm4a', 'ogg', 'amr', 'aac', 'flac'],
+            accept_multiple_files=True
         )
         
-        if uploaded_audio is not None:
-            final_audio_bytes = uploaded_audio.getvalue()
-            # Extract extension from uploaded file
-            file_extension = uploaded_audio.name.split('.')[-1].lower()
-            
-            # Allow them to listen and confirm the file is correct before uploading
-            st.markdown("**Preview your selected file:**")
-            try:
-                st.audio(final_audio_bytes, format=f'audio/{file_extension}')
-            except Exception:
-                st.caption("*(Preview may not be available for all file types in browser, but upload will still work)*")
+        if uploaded_audios:
+            st.markdown("**Preview selected files:**")
+            for uploaded_audio in uploaded_audios:
+                file_extension = uploaded_audio.name.split('.')[-1].lower()
+                try:
+                    st.audio(uploaded_audio.getvalue(), format=f'audio/{file_extension}')
+                except Exception:
+                    st.caption(f"*(Preview may not be available for {uploaded_audio.name}, but upload will still work)*")
             
             # 3. Save Button
             st.markdown("---")
             st.subheader("3️⃣ Save & Upload")
             
-            # Generate a clean filename: username_uniqueid_timestamp.extension
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            safe_name = farmer_name.replace(' ', '_').lower()
-            filename = f"{enumerator}_{farmer_id}_{safe_name}_{timestamp}.{file_extension}"
-            
-            if st.button("📤 Upload Audio to Database", type="primary"):
-                with st.spinner("Uploading audio file to secure repository... please wait."):
-                    success = save_audio_to_github(final_audio_bytes, filename)
+            if st.button("📤 Upload Audio Files to Database", type="primary"):
+                with st.spinner("Uploading audio files to secure repository... please wait."):
+                    file_extensions = [audio.name.split('.')[-1].lower() for audio in uploaded_audios]
+                    filenames = build_audio_filenames(enumerator, farmer_id, farmer_name, file_extensions)
+                    success_count = 0
                     
-                    if success:
-                        st.success(f"✅ Successfully uploaded: `{filename}`")
+                    for uploaded_audio, filename in zip(uploaded_audios, filenames):
+                        success = save_audio_to_github(uploaded_audio.getvalue(), filename)
+                        if success:
+                            success_count += 1
+                    
+                    if success_count > 0:
+                        st.success(f"✅ Successfully uploaded {success_count} file(s) for {farmer_name}")
                         st.balloons()
                     else:
                         st.error("❌ Failed to upload. Please try again.")
