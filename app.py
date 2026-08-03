@@ -6,6 +6,24 @@ import requests
 import base64
 from typing import Optional, Dict
 
+
+def export_dataframe_to_excel(df: pd.DataFrame, output_path: str, sheet_name: str = "Sheet1") -> str:
+    """Export a dataframe to Excel when possible, otherwise fall back to CSV."""
+    for engine in ("xlsxwriter", "openpyxl"):
+        try:
+            with pd.ExcelWriter(output_path, engine=engine) as writer:
+                df.to_excel(writer, sheet_name=sheet_name, index=False)
+            return output_path
+        except ModuleNotFoundError as exc:
+            if exc.name not in {"xlsxwriter", "openpyxl"}:
+                raise
+            last_error = exc
+
+    csv_path = output_path.rsplit(".", 1)[0] + ".csv"
+    df.to_csv(csv_path, index=False)
+    st.warning("Excel export is unavailable in this runtime; the data was saved as CSV instead.")
+    return csv_path
+
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
