@@ -298,13 +298,142 @@ def render_upload_interface(df_assignments: pd.DataFrame):
     st.markdown('</div>', unsafe_allow_html=True)
 
 # ============================================================================
-# ADMIN INTERFACE
+# ADMIN INTERFACE HELPERS
 # ============================================================================
 
-def render_admin_interface():
+@st.cache_data(ttl=600)
+def fetch_uploaded_audio_files() -> list[dict]:
+    """Fetch all audio files from the GitHub repository"""
+    try:
+        headers = get_github_headers()
+        url = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents/{AUDIO_FOLDER}"
+        response = requests.get(url, headers=headers, timeout=10)
+        
+        if response.status_code == 200:
+            files = response.json()
+            audio_files = []
+            for file in files:
+                if file['type'] == 'file' and any(file['name'].lower().endswith(ext) for ext in ['wav', 'mp3', 'm4a', 'ogg', 'amr', 'aac', 'flac']):
+                    audio_files.append({
+                        'name': file['name'],
+                        'size': file['size'],
+                        'url': file['html_url']
+                    })
+            return audio_files
+        else:
+            st.warning("No audio files found in repository yet.")
+            return []
+    except Exception as e:
+        st.error(f"Error fetching audio files: {str(e)}")
+        return []
+
+def parse_audio_filename(filename: str) -> dict:
+    """Parse the audio filename to extract enumerator, farmer_id, and farmer_name"""
+    # Format: {enumerator}_{farmer_id}_{farmer_name}_{timestamp}[_{index}].{extension}
+    try:
+        # Remove extension
+        name_without_ext = filename.rsplit('.', 1)[0]
+        parts = name_without_ext.split('_')
+        
+        if len(parts) >= 4:
+            enumerator = parts[0]
+            farmer_id = parts[1]
+            # Farmer name is everything between farmer_id and timestamp
+            # Timestamp is the part with numbers and underscore like "20240115_120530"
+            timestamp_start = None
+            for i in range(2, len(parts)):
+                if len(parts[i]) == 8 and parts[i].isdigit():  # YYYYMMDD format
+                    timestamp_start = i
+                    break
+            
+            if timestamp_start:
+                farmer_name = '_'.join(parts[2:timestamp_start]).replace('_', ' ').title()
+                timestamp = '_'.join(parts[timestamp_start:timestamp_start+2])
+                return {
+                    'enumerator': enumerator,
+                    'farmer_id': farmer_id,
+                    'farmer_name': farmer_name,
+                    'timestamp': timestamp
+                }
+    except Exception:
+        pass
+    
+    return {
+        'enumerator': 'Unknown',
+        'farmer_id': 'Unknown',
+        'farmer_name': 'Unknown',
+        'timestamp': 'Unknown'
+    }
+
+def build_admin_statistics(df_assignments: pd.DataFrame, audio_files: list[dict]) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
+    """Build statistics dataframes and summary info for admin dashboard"""
+    
+    # Parse all audio files
+    parsed_files = [parse_audio_filename(f['name']) for f in audio_files]
+    df_audio = pd.DataFrame(parsed_files)
+    
+    # 1. Enumerator Summary
+    enumerators_list = sorted(df_assignments['username'].unique().tolist())
+    enumerator_stats = []
+    
+    for enum_name in enumerators_list:
+        enum_farmers = df_assignments[df_assignments['username'] == enum_name]
+        total_expected = len(enum_farmers)
+        
+        files_uploaded = len(df_audio[df_audio['enumerator'] == enum_name]) if not df_audio.empty else 0
+        remaining = max(0, total_expected - files_uploaded)
+        completion_pct = (files_uploaded / total_expected * 100) if total_expected > 0 else 0
+        
+        # Get list of farmers for this enumerator
+        farmers_str = ", ".join(enum_farmers['farmer_name'].tolist())
+        farmer_ids_str = ", ".join(enum_farmers['unique_id'].astype(str).tolist())
+        
+        enumerator_stats.append({
+            'Enumerator': enum_name,
+            'Farmers Assigned': total_expected,
+            'Files Uploaded': files_uploaded,
+            'Remaining': remaining,
+            'Completion %': f"{completion_pct:.0f}%",
+            'Farmer Names': farmers_str,
+            'Farmer IDs': farmer_ids_str
+        })
+    
+    df_enumerators = pd.DataFrame(enumerator_stats)
+    
+    # 2. Detailed Farmer Status
+    farmer_status = []
+    for _, farmer in df_assignments.iterrows():
+        enum_name = farmer['username']
+        farmer_id = farmer['unique_id']
+        farmer_name = farmer['farmer_name']
+        
+        # Count files for this specific farmer
+        files_count = len(df_audio[(df_audio['enumerator'] == enum_name) & (df_audio['farmer_id'] == str(farmer_id))]) if not df_audio.empty else 0
+        
+        farmer_status.append({
+            'Enumerator': enum_name,
+            'Farmer Name': farmer_name,
+            'Farmer ID': farmer_id,
+            'Files Uploaded': files_count,
+            'Status': '✅ Completed' if files_count > 0 else '⏳ Pending'
+        })
+    
+    df_farmers = pd.DataFrame(farmer_status)
+    
+    # 3. Summary Statistics
+    summary = {
+        'total_enumerators': len(enumerators_list),
+        'total_farmers': len(df_assignments),
+        'total_files_uploaded': len(audio_files),
+        'overall_completion': f"{len(audio_files) / len(df_assignments) * 100:.1f}%" if len(df_assignments) > 0 else "0%"
+    }
+    
+    return df_enumerators, df_farmers, summary
+
+def render_admin_interface(df_assignments: pd.DataFrame):
     col1, col2 = st.columns([6, 1])
     with col1:
-        st.title("👑 Admin - Audio Records")
+        st.title("👑 Admin Dashboard - Upload Progress")
     with col2:
         if st.button("🚪 Logout", type="secondary"):
             st.session_state.is_authenticated = False
@@ -312,15 +441,93 @@ def render_admin_interface():
             
     st.markdown("---")
     
-    st.info("As an admin, you can view the repository directly to download and review the uploaded audio files.")
+    # Fetch audio files
+    with st.spinner("📊 Loading upload statistics..."):
+        audio_files = fetch_uploaded_audio_files()
+        df_enumerators, df_farmers, summary = build_admin_statistics(df_assignments, audio_files)
     
+    # Summary Cards
+    st.subheader("📈 Overall Statistics")
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("Total Enumerators", summary['total_enumerators'])
+    with col2:
+        st.metric("Total Farmers", summary['total_farmers'])
+    with col3:
+        st.metric("Audio Files Uploaded", summary['total_files_uploaded'])
+    with col4:
+        st.metric("Overall Completion", summary['overall_completion'])
+    
+    st.markdown("---")
+    
+    # Enumerator Summary Table
+    st.subheader("👥 Enumerator Status & Farmers")
+    st.dataframe(
+        df_enumerators,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Enumerator": st.column_config.TextColumn("Enumerator", width="medium"),
+            "Farmers Assigned": st.column_config.NumberColumn("Farmers Assigned", width="small"),
+            "Files Uploaded": st.column_config.NumberColumn("Files Uploaded", width="small"),
+            "Remaining": st.column_config.NumberColumn("Remaining", width="small"),
+            "Completion %": st.column_config.TextColumn("Completion %", width="small"),
+            "Farmer Names": st.column_config.TextColumn("Farmer Names", width="large"),
+            "Farmer IDs": st.column_config.TextColumn("Farmer IDs", width="medium")
+        }
+    )
+    
+    st.markdown("---")
+    
+    # Detailed Farmer Status Table
+    st.subheader("🚜 Detailed Farmer Status")
+    st.dataframe(
+        df_farmers,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Enumerator": st.column_config.TextColumn("Enumerator", width="medium"),
+            "Farmer Name": st.column_config.TextColumn("Farmer Name", width="large"),
+            "Farmer ID": st.column_config.TextColumn("Farmer ID", width="small"),
+            "Files Uploaded": st.column_config.NumberColumn("Files Uploaded", width="small"),
+            "Status": st.column_config.TextColumn("Status", width="small")
+        }
+    )
+    
+    st.markdown("---")
+    
+    # Direct GitHub Access
+    st.subheader("📂 Access Audio Files")
     url = f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}/tree/main/{AUDIO_FOLDER}"
-    st.markdown(f"""
-        ### 📂 Access Audio Files
-        All audio files uploaded by enumerators are saved securely in the private repository.
-        
-        👉 **[Click here to view the audio folder on GitHub]({url})**
-    """)
+    st.info(f"[🔗 View all audio files on GitHub]({url})")
+    
+    # Download section
+    if len(df_farmers) > 0:
+        st.subheader("📥 Export Reports")
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            # Export enumerator summary
+            csv_enum = df_enumerators.to_csv(index=False)
+            st.download_button(
+                label="📥 Download Enumerator Report",
+                data=csv_enum,
+                file_name=f"enumerator_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                mime="text/csv"
+            )
+        with col2:
+            # Export farmer status
+            csv_farmers = df_farmers.to_csv(index=False)
+            st.download_button(
+                label="📥 Download Farmer Status",
+                data=csv_farmers,
+                file_name=f"farmer_status_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                mime="text/csv"
+            )
+        with col3:
+            # Refresh button to clear cache
+            if st.button("🔄 Refresh Statistics", type="secondary"):
+                st.cache_data.clear()
+                st.rerun()
 
 # ============================================================================
 # MAIN
@@ -336,7 +543,7 @@ def main():
         render_login_page(df_assignments)
     else:
         if st.session_state.is_admin:
-            render_admin_interface()
+            render_admin_interface(df_assignments)
         else:
             render_upload_interface(df_assignments)
 
